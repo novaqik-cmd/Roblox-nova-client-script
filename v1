@@ -1,1 +1,1 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/novaqik-cmd/Roblox-nova-client-script/refs/heads/main/nova%20client.txt"))()   
+loadstring(game:HttpGet("https://github.com/novaqik-cmd/Roblox-nova-client-script/blob/main/nova%20client.txt"))()   
