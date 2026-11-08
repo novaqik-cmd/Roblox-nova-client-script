@@ -18,7 +18,24 @@ end
 ------------------------------------------------------------------
 -- SETTINGS (live values, edited by the UI)
 ------------------------------------------------------------------
+-- Furthest distance the slider can go. If the game uses StreamingEnabled this is
+-- the real streaming radius (nothing past it exists on your client); otherwise it
+-- falls back to the number below. Slider at max = no distance limit at all.
+local FALLBACK_MAX_DISTANCE = 5000
+local function getMaxDistance()
+    local ok, streaming = pcall(function() return workspace.StreamingEnabled end)
+    if ok and streaming then
+        local ok2, radius = pcall(function() return workspace.StreamingTargetRadius end)
+        if ok2 and type(radius) == "number" and radius > 0 then
+            return math.floor(radius)
+        end
+    end
+    return FALLBACK_MAX_DISTANCE
+end
+local MaxDistanceCap = getMaxDistance()
+
 local Settings = {
+    MaxDistance  = MaxDistanceCap,
     Enabled      = true,
     Chams        = true,
     Username     = true,
@@ -133,6 +150,8 @@ ESPFolder.Name = rndName()
 mount(ESPFolder)
 
 local ESPObjects = {}
+local MAX_HIGHLIGHTS = 31   -- Roblox only renders ~31 Highlights at once, nearest players get them
+local SCAN_INTERVAL  = 0.15 -- how often players/characters are re-checked and re-attached
 
 local function isTeammate(plr)
     return LocalPlayer.Team ~= nil and plr.Team == LocalPlayer.Team
@@ -153,17 +172,11 @@ local function removeESP(plr)
     end
 end
 
-local function buildESP(plr, char)
-    local hum  = char:WaitForChild("Humanoid", 10)
-    local root = char:WaitForChild("HumanoidRootPart", 10)
-    if unloaded or not hum or not root or plr.Character ~= char then return end
-    removeESP(plr)
-
-    local head = char:FindFirstChild("Head") or root
-
+-- one ESP object per player; it lives as long as the player does and is
+-- re-bound to whatever character the player currently has
+local function createESP(plr)
     local highlight = create("Highlight", {
         Name = rndName(),
-        Adornee = char,
         DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
         FillTransparency = 0.55,
         OutlineTransparency = 0,
@@ -173,7 +186,6 @@ local function buildESP(plr, char)
 
     local gui = create("BillboardGui", {
         Name = rndName(),
-        Adornee = head,
         AlwaysOnTop = true,
         Size = UDim2.fromOffset(180, 120),
         StudsOffset = Vector3.new(0, 2.2, 0),
@@ -242,63 +254,152 @@ local function buildESP(plr, char)
         Parent = stack,
     })
 
-    ESPObjects[plr] = {
+    local obj = {
         highlight = highlight, gui = gui,
         nameLabel = nameLabel, barBG = barBG, barFill = barFill, infoLabel = infoLabel,
-        hum = hum, root = root,
+        char = nil, hum = nil, root = nil, head = nil,
+        dist = math.huge, active = false, rank = 1,
     }
+    ESPObjects[plr] = obj
+    return obj
 end
 
-local function trackPlayer(plr)
-    if plr == LocalPlayer then return end
-    connect(plr.CharacterAdded, function(char) task.spawn(buildESP, plr, char) end)
-    connect(plr.CharacterRemoving, function() removeESP(plr) end)
-    if plr.Character then task.spawn(buildESP, plr, plr.Character) end
+local function unbind(obj)
+    obj.char, obj.hum, obj.root, obj.head = nil, nil, nil, nil
+    obj.highlight.Adornee = nil
+    obj.gui.Adornee = nil
 end
 
-for _, p in ipairs(Players:GetPlayers()) do trackPlayer(p) end
-connect(Players.PlayerAdded, trackPlayer)
-connect(Players.PlayerRemoving, removeESP)
+-- attach the ESP to the player's current character (no yielding, so a
+-- half-streamed character just gets retried on the next scan)
+local function bindCharacter(plr, obj)
+    local char = plr.Character
+    if not char or not char.Parent then
+        unbind(obj)
+        return
+    end
+    local root = char:FindFirstChild("HumanoidRootPart")
+        or char.PrimaryPart
+        or char:FindFirstChildWhichIsA("BasePart")
+    if not root then
+        unbind(obj)
+        return
+    end
+    obj.char = char
+    obj.hum = char:FindFirstChildOfClass("Humanoid")
+    obj.root = root
+    obj.head = char:FindFirstChild("Head") or root
+    obj.highlight.Adornee = char
+    obj.gui.Adornee = obj.head
+end
 
-connect(RunService.RenderStepped, function()
-    local myChar = LocalPlayer.Character
-    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    local anyInfo = Settings.Username or Settings.Distance or Settings.Health
+local function needsRebind(plr, obj)
+    local char = plr.Character
+    if char ~= obj.char then return true end   -- respawned / streamed in / streamed out
+    if not char then return false end
+    if not obj.root or not obj.root.Parent then return true end
+    if obj.head.Parent == nil then return true end
+    if obj.head == obj.root and char:FindFirstChild("Head") then return true end
+    if obj.hum then
+        if not obj.hum.Parent then return true end
+    elseif char:FindFirstChildOfClass("Humanoid") then
+        return true
+    end
+    return false
+end
 
-    for plr, obj in pairs(ESPObjects) do
-        local hum, root = obj.hum, obj.root
-        local alive = hum.Parent ~= nil and root.Parent ~= nil and hum.Health > 0
-        local active = Settings.Enabled and alive
-
-        obj.highlight.Enabled = active and Settings.Chams
-        obj.gui.Enabled = active and anyInfo
-
-        if active then
-            local color = getColor(plr)
-            obj.highlight.FillColor = color
-            obj.highlight.OutlineColor = color
-
-            obj.nameLabel.Visible = Settings.Username
-            obj.nameLabel.TextColor3 = color
-
-            local maxHp = math.max(hum.MaxHealth, 1)
-            local hp = math.clamp(hum.Health, 0, maxHp)
-            local pct = hp / maxHp
-            obj.barBG.Visible = Settings.Health
-            obj.barFill.Size = UDim2.fromScale(pct, 1)
-            obj.barFill.BackgroundColor3 = Color3.fromHSV(pct * 0.33, 0.75, 1)
-
-            local parts = {}
-            if Settings.Distance and myRoot then
-                parts[#parts + 1] = math.floor((root.Position - myRoot.Position).Magnitude) .. "m"
-            end
-            if Settings.Health then
-                parts[#parts + 1] = math.floor(hp) .. " HP"
-            end
-            obj.infoLabel.Visible = #parts > 0
-            obj.infoLabel.Text = table.concat(parts, "  |  ")
+-- keeps every player in the server attached to the ESP
+local function scan()
+    for plr in pairs(ESPObjects) do
+        if plr.Parent ~= Players then removeESP(plr) end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local obj = ESPObjects[plr] or createESP(plr)
+            if needsRebind(plr, obj) then bindCharacter(plr, obj) end
         end
     end
+end
+
+-- only the nearest MAX_HIGHLIGHTS players get chams so none of them silently vanish
+local function rankChams()
+    local list = {}
+    for _, obj in pairs(ESPObjects) do
+        if obj.active then list[#list + 1] = obj end
+    end
+    table.sort(list, function(a, b) return a.dist < b.dist end)
+    for i, obj in ipairs(list) do obj.rank = i end
+end
+
+local function updatePlayer(plr, obj, origin, limit)
+    local hum, root = obj.hum, obj.root
+    local valid = obj.char ~= nil and root ~= nil and root.Parent ~= nil
+    local alive = valid and (hum == nil or (hum.Parent ~= nil and hum.Health > 0))
+
+    local dist = math.huge
+    if valid and origin then dist = (root.Position - origin).Magnitude end
+    obj.dist = dist
+
+    local active = Settings.Enabled and alive and dist <= limit
+    obj.active = active
+
+    obj.highlight.Enabled = active and Settings.Chams and obj.rank <= MAX_HIGHLIGHTS
+    obj.gui.Enabled = active and (Settings.Username or Settings.Distance or Settings.Health)
+    if not active then return end
+
+    local color = getColor(plr)
+    obj.highlight.FillColor = color
+    obj.highlight.OutlineColor = color
+
+    obj.nameLabel.Visible = Settings.Username
+    obj.nameLabel.TextColor3 = color
+
+    local parts = {}
+    if Settings.Distance and origin then
+        parts[#parts + 1] = math.floor(dist) .. "m"
+    end
+
+    if hum and Settings.Health then
+        local maxHp = math.max(hum.MaxHealth, 1)
+        local hp = math.clamp(hum.Health, 0, maxHp)
+        local pct = hp / maxHp
+        obj.barBG.Visible = true
+        obj.barFill.Size = UDim2.fromScale(pct, 1)
+        obj.barFill.BackgroundColor3 = Color3.fromHSV(pct * 0.33, 0.75, 1)
+        parts[#parts + 1] = math.floor(hp) .. " HP"
+    else
+        obj.barBG.Visible = false
+    end
+
+    obj.infoLabel.Visible = #parts > 0
+    obj.infoLabel.Text = table.concat(parts, "  |  ")
+end
+
+connect(Players.PlayerRemoving, removeESP)
+
+local scanTimer = SCAN_INTERVAL -- forces a scan on the very first frame
+connect(RunService.RenderStepped, function(dt)
+    local doScan = false
+    scanTimer = scanTimer + dt
+    if scanTimer >= SCAN_INTERVAL then
+        scanTimer = 0
+        doScan = true
+        pcall(scan)
+    end
+
+    -- distance is measured from your character, or from the camera if you're dead/respawning
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar.PrimaryPart)
+    local cam = workspace.CurrentCamera
+    local origin = myRoot and myRoot.Position or (cam and cam.CFrame.Position)
+
+    local limit = (Settings.MaxDistance >= MaxDistanceCap) and math.huge or Settings.MaxDistance
+
+    for plr, obj in pairs(ESPObjects) do
+        pcall(updatePlayer, plr, obj, origin, limit) -- one bad player can't break the others
+    end
+
+    if doScan then pcall(rankChams) end
 end)
 
 ------------------------------------------------------------------
@@ -684,6 +785,100 @@ local function createToggle(parent, text, default, callback)
     end)
 end
 
+local function createSlider(parent, text, min, max, default, callback)
+    local row, label = createRow(parent, text)
+    row.Size = UDim2.new(1, 0, 0, 52)
+    label.Size = UDim2.new(1, -110, 0, 32)
+
+    local valueLabel = create("TextLabel", {
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -12, 0, 0),
+        Size = UDim2.fromOffset(90, 32),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        TextColor3 = Theme.SubText,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Text = "",
+        Parent = row,
+    })
+
+    local hit = create("Frame", {
+        Position = UDim2.fromOffset(12, 30),
+        Size = UDim2.new(1, -24, 0, 16),
+        BackgroundTransparency = 1,
+        Parent = row,
+    })
+    local track = create("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.fromScale(0, 0.5),
+        Size = UDim2.new(1, 0, 0, 6),
+        BackgroundColor3 = Theme.Off,
+        BorderSizePixel = 0,
+        Parent = hit,
+    })
+    corner(track, 3)
+    local fill = create("Frame", {
+        Size = UDim2.fromScale(0, 1),
+        BackgroundColor3 = Theme.Accent,
+        BorderSizePixel = 0,
+        Parent = track,
+    })
+    corner(fill, 3)
+    local knob = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0, 0.5),
+        Size = UDim2.fromOffset(12, 12),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 2,
+        Parent = track,
+    })
+    corner(knob, 6)
+
+    local range = math.max(max - min, 1)
+    local value = math.clamp(default, min, max)
+
+    local function render()
+        local pct = (value - min) / range
+        fill.Size = UDim2.fromScale(pct, 1)
+        knob.Position = UDim2.fromScale(pct, 0.5)
+        valueLabel.Text = (value >= max) and "Max" or (value .. "m")
+    end
+    render()
+
+    local dragging = false
+    local function setFromMouse()
+        local m = UserInputService:GetMouseLocation()
+        local pct = math.clamp((m.X - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+        local v = math.floor(min + range * pct + 0.5)
+        v = math.clamp(math.floor(v / 10 + 0.5) * 10, min, max) -- snap to steps of 10
+        if pct >= 1 then v = max elseif pct <= 0 then v = min end
+        value = v
+        render()
+        callback(value)
+    end
+
+    connect(hit.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            tween(knob, 0.15, { Size = UDim2.fromOffset(16, 16) })
+            setFromMouse()
+        end
+    end)
+    connect(UserInputService.InputChanged, function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            setFromMouse()
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+            tween(knob, 0.2, { Size = UDim2.fromOffset(12, 12) })
+        end
+    end)
+end
+
 -- colour picker popup (shared by all colour rows)
 local Picker = {}
 do
@@ -977,6 +1172,9 @@ local settingsHolder = createPage("Settings", false)
 createSection(homeHolder, "ESP")
 createToggle(homeHolder, "ESP Enabled", Settings.Enabled, function(v) Settings.Enabled = v end)
 createToggle(homeHolder, "Chams", Settings.Chams, function(v) Settings.Chams = v end)
+createSlider(homeHolder, "Max Distance", math.min(50, MaxDistanceCap), MaxDistanceCap, Settings.MaxDistance, function(v)
+    Settings.MaxDistance = v
+end)
 
 createSection(homeHolder, "Player Info")
 createToggle(homeHolder, "Show Username", Settings.Username, function(v) Settings.Username = v end)
