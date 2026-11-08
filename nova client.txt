@@ -1,0 +1,1084 @@
+--[[
+    NOVA CLIENT
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- unload previous instance if re-executed
+local env = (getgenv and getgenv()) or _G
+if env.NovaClientUnload then
+    pcall(env.NovaClientUnload)
+end
+
+------------------------------------------------------------------
+-- SETTINGS (live values, edited by the UI)
+------------------------------------------------------------------
+local Settings = {
+    Enabled      = true,
+    Chams        = true,
+    Username     = true,
+    Distance     = true,
+    Health       = true,
+    TeamColors   = true,
+    EnemyColor   = Color3.fromRGB(255, 75, 75),
+    TeamColor    = Color3.fromRGB(75, 200, 120),
+    DefaultColor = Color3.fromRGB(255, 255, 255), -- used when Team Colors is off
+    Keybind      = Enum.KeyCode.RightShift,
+}
+
+local Theme = {
+    Background   = Color3.fromRGB(10, 10, 10),
+    Topbar       = Color3.fromRGB(14, 14, 14),
+    Element      = Color3.fromRGB(20, 20, 20),
+    ElementHover = Color3.fromRGB(27, 27, 27),
+    Stroke       = Color3.fromRGB(38, 38, 38),
+    Text         = Color3.fromRGB(235, 235, 235),
+    SubText      = Color3.fromRGB(125, 125, 125),
+    Accent       = Color3.fromRGB(129, 140, 248),
+    Off          = Color3.fromRGB(46, 46, 46),
+}
+
+------------------------------------------------------------------
+-- UTILITIES
+------------------------------------------------------------------
+local connections = {}
+local unloaded = false
+local Unload -- assigned at the bottom
+
+local function connect(signal, fn)
+    local c = signal:Connect(fn)
+    connections[#connections + 1] = c
+    return c
+end
+
+local function tween(obj, time, props, style, dir)
+    local t = TweenService:Create(
+        obj,
+        TweenInfo.new(time, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out),
+        props
+    )
+    t:Play()
+    return t
+end
+
+local function create(class, props, children)
+    local inst = Instance.new(class)
+    local parent
+    for k, v in pairs(props or {}) do
+        if k == "Parent" then parent = v else inst[k] = v end
+    end
+    for _, child in ipairs(children or {}) do
+        child.Parent = inst
+    end
+    if parent then inst.Parent = parent end
+    return inst
+end
+
+local function corner(obj, radius)
+    return create("UICorner", { CornerRadius = UDim.new(0, radius), Parent = obj })
+end
+
+local function stroke(obj, color, thickness, transparency)
+    return create("UIStroke", {
+        Color = color,
+        Thickness = thickness or 1,
+        Transparency = transparency or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        Parent = obj,
+    })
+end
+
+local orderCounter = 0
+local function nextOrder()
+    orderCounter = orderCounter + 1
+    return orderCounter
+end
+
+local function rndName()
+    local chars = {}
+    for i = 1, 12 do chars[i] = string.char(math.random(97, 122)) end
+    return table.concat(chars)
+end
+
+local function getGuiParent()
+    if gethui then
+        local ok, ui = pcall(gethui)
+        if ok and typeof(ui) == "Instance" then return ui end
+    end
+    local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok and cg then return cg end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local GuiParent = getGuiParent()
+
+local function mount(inst)
+    if syn and syn.protect_gui then pcall(syn.protect_gui, inst) end
+    local ok = pcall(function() inst.Parent = GuiParent end)
+    if not ok or inst.Parent ~= GuiParent then
+        inst.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+end
+
+------------------------------------------------------------------
+-- ESP / CHAMS
+------------------------------------------------------------------
+local ESPFolder = Instance.new("Folder")
+ESPFolder.Name = rndName()
+mount(ESPFolder)
+
+local ESPObjects = {}
+
+local function isTeammate(plr)
+    return LocalPlayer.Team ~= nil and plr.Team == LocalPlayer.Team
+end
+
+local function getColor(plr)
+    if not Settings.TeamColors then return Settings.DefaultColor end
+    if isTeammate(plr) then return Settings.TeamColor end
+    return Settings.EnemyColor
+end
+
+local function removeESP(plr)
+    local obj = ESPObjects[plr]
+    if obj then
+        ESPObjects[plr] = nil
+        pcall(function() obj.highlight:Destroy() end)
+        pcall(function() obj.gui:Destroy() end)
+    end
+end
+
+local function buildESP(plr, char)
+    local hum  = char:WaitForChild("Humanoid", 10)
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if unloaded or not hum or not root or plr.Character ~= char then return end
+    removeESP(plr)
+
+    local head = char:FindFirstChild("Head") or root
+
+    local highlight = create("Highlight", {
+        Name = rndName(),
+        Adornee = char,
+        DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        FillTransparency = 0.55,
+        OutlineTransparency = 0,
+        Enabled = false,
+        Parent = ESPFolder,
+    })
+
+    local gui = create("BillboardGui", {
+        Name = rndName(),
+        Adornee = head,
+        AlwaysOnTop = true,
+        Size = UDim2.fromOffset(180, 120),
+        StudsOffset = Vector3.new(0, 2.2, 0),
+        LightInfluence = 0,
+        Enabled = false,
+        Parent = ESPFolder,
+    })
+
+    -- stack sits directly above the billboard's centre point (above the head)
+    local stack = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 1),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromScale(1, 0.5),
+        BackgroundTransparency = 1,
+        Parent = gui,
+    })
+    create("UIListLayout", {
+        FillDirection = Enum.FillDirection.Vertical,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        VerticalAlignment = Enum.VerticalAlignment.Bottom,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 2),
+        Parent = stack,
+    })
+
+    local nameLabel = create("TextLabel", {
+        LayoutOrder = 1,
+        Size = UDim2.new(1, 0, 0, 14),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        Text = plr.Name,
+        TextColor3 = Color3.new(1, 1, 1),
+        TextStrokeTransparency = 0.35,
+        TextStrokeColor3 = Color3.new(0, 0, 0),
+        Parent = stack,
+    })
+
+    local barBG = create("Frame", {
+        LayoutOrder = 2,
+        Size = UDim2.fromOffset(60, 5),
+        BackgroundColor3 = Color3.fromRGB(12, 12, 12),
+        BackgroundTransparency = 0.1,
+        BorderSizePixel = 0,
+        Parent = stack,
+    })
+    corner(barBG, 3)
+    local barFill = create("Frame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Color3.fromRGB(80, 220, 120),
+        BorderSizePixel = 0,
+        Parent = barBG,
+    })
+    corner(barFill, 3)
+
+    local infoLabel = create("TextLabel", {
+        LayoutOrder = 3,
+        Size = UDim2.new(1, 0, 0, 12),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 11,
+        Text = "",
+        TextColor3 = Color3.fromRGB(235, 235, 235),
+        TextStrokeTransparency = 0.4,
+        TextStrokeColor3 = Color3.new(0, 0, 0),
+        Parent = stack,
+    })
+
+    ESPObjects[plr] = {
+        highlight = highlight, gui = gui,
+        nameLabel = nameLabel, barBG = barBG, barFill = barFill, infoLabel = infoLabel,
+        hum = hum, root = root,
+    }
+end
+
+local function trackPlayer(plr)
+    if plr == LocalPlayer then return end
+    connect(plr.CharacterAdded, function(char) task.spawn(buildESP, plr, char) end)
+    connect(plr.CharacterRemoving, function() removeESP(plr) end)
+    if plr.Character then task.spawn(buildESP, plr, plr.Character) end
+end
+
+for _, p in ipairs(Players:GetPlayers()) do trackPlayer(p) end
+connect(Players.PlayerAdded, trackPlayer)
+connect(Players.PlayerRemoving, removeESP)
+
+connect(RunService.RenderStepped, function()
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local anyInfo = Settings.Username or Settings.Distance or Settings.Health
+
+    for plr, obj in pairs(ESPObjects) do
+        local hum, root = obj.hum, obj.root
+        local alive = hum.Parent ~= nil and root.Parent ~= nil and hum.Health > 0
+        local active = Settings.Enabled and alive
+
+        obj.highlight.Enabled = active and Settings.Chams
+        obj.gui.Enabled = active and anyInfo
+
+        if active then
+            local color = getColor(plr)
+            obj.highlight.FillColor = color
+            obj.highlight.OutlineColor = color
+
+            obj.nameLabel.Visible = Settings.Username
+            obj.nameLabel.TextColor3 = color
+
+            local maxHp = math.max(hum.MaxHealth, 1)
+            local hp = math.clamp(hum.Health, 0, maxHp)
+            local pct = hp / maxHp
+            obj.barBG.Visible = Settings.Health
+            obj.barFill.Size = UDim2.fromScale(pct, 1)
+            obj.barFill.BackgroundColor3 = Color3.fromHSV(pct * 0.33, 0.75, 1)
+
+            local parts = {}
+            if Settings.Distance and myRoot then
+                parts[#parts + 1] = math.floor((root.Position - myRoot.Position).Magnitude) .. "m"
+            end
+            if Settings.Health then
+                parts[#parts + 1] = math.floor(hp) .. " HP"
+            end
+            obj.infoLabel.Visible = #parts > 0
+            obj.infoLabel.Text = table.concat(parts, "  |  ")
+        end
+    end
+end)
+
+------------------------------------------------------------------
+-- UI: WINDOW
+------------------------------------------------------------------
+local ScreenGui = create("ScreenGui", {
+    Name = rndName(),
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    DisplayOrder = 999,
+})
+mount(ScreenGui)
+
+local Main = create("CanvasGroup", {
+    Name = "Main",
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(460, 380),
+    BackgroundColor3 = Theme.Background,
+    BorderSizePixel = 0,
+    GroupTransparency = 1,
+    Visible = false,
+    Parent = ScreenGui,
+})
+corner(Main, 12)
+stroke(Main, Theme.Stroke, 1)
+local Scale = create("UIScale", { Scale = 0.9, Parent = Main })
+
+-- top bar
+local Topbar = create("Frame", {
+    Size = UDim2.new(1, 0, 0, 46),
+    BackgroundColor3 = Theme.Topbar,
+    BorderSizePixel = 0,
+    Parent = Main,
+})
+create("Frame", {
+    Position = UDim2.new(0, 0, 1, -1),
+    Size = UDim2.new(1, 0, 0, 1),
+    BackgroundColor3 = Theme.Stroke,
+    BorderSizePixel = 0,
+    Parent = Topbar,
+})
+local DragHandle = create("Frame", {
+    Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1,
+    Parent = Topbar,
+})
+
+local HintLabel = create("TextLabel", {
+    AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -14, 0.5, 0),
+    Size = UDim2.fromOffset(170, 16),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamMedium,
+    TextSize = 11,
+    TextColor3 = Theme.SubText,
+    TextXAlignment = Enum.TextXAlignment.Right,
+    Text = "[" .. Settings.Keybind.Name .. "] hide",
+    Parent = Topbar,
+})
+
+-- footer with brand
+local Footer = create("Frame", {
+    AnchorPoint = Vector2.new(0, 1),
+    Position = UDim2.fromScale(0, 1),
+    Size = UDim2.new(1, 0, 0, 28),
+    BackgroundColor3 = Theme.Topbar,
+    BorderSizePixel = 0,
+    Parent = Main,
+})
+create("Frame", {
+    Size = UDim2.new(1, 0, 0, 1),
+    BackgroundColor3 = Theme.Stroke,
+    BorderSizePixel = 0,
+    Parent = Footer,
+})
+local Brand = create("TextLabel", {
+    AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -14, 0.5, 0),
+    Size = UDim2.fromOffset(140, 18),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.Michroma,
+    Text = "nova client",
+    TextSize = 11,
+    TextColor3 = Color3.new(1, 1, 1),
+    TextXAlignment = Enum.TextXAlignment.Right,
+    Parent = Footer,
+})
+create("UIGradient", {
+    Color = ColorSequence.new(Theme.Accent, Color3.fromRGB(235, 225, 255)),
+    Parent = Brand,
+})
+
+------------------------------------------------------------------
+-- UI: ICONS (built from frames, so no asset ids needed)
+------------------------------------------------------------------
+local function makeIcon(parent, parts)
+    return {
+        set = function(color)
+            for _, p in ipairs(parts) do
+                tween(p, 0.2, { BackgroundColor3 = color })
+            end
+        end,
+        setInstant = function(color)
+            for _, p in ipairs(parts) do p.BackgroundColor3 = color end
+        end,
+    }
+end
+
+local function iconHolder(parent)
+    return create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(20, 20),
+        BackgroundTransparency = 1,
+        Parent = parent,
+    })
+end
+
+local function buildHomeIcon(parent)
+    local holder = iconHolder(parent)
+    local roof = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromOffset(10, 7),
+        Size = UDim2.fromOffset(10, 10),
+        Rotation = 45,
+        BorderSizePixel = 0,
+        Parent = holder,
+    })
+    corner(roof, 1)
+    local body = create("Frame", {
+        Position = UDim2.fromOffset(3, 7),
+        Size = UDim2.fromOffset(14, 10),
+        BorderSizePixel = 0,
+        Parent = holder,
+    })
+    corner(body, 2)
+    create("Frame", { -- door cut-out
+        Position = UDim2.fromOffset(8, 11),
+        Size = UDim2.fromOffset(4, 6),
+        BackgroundColor3 = Theme.Topbar,
+        BorderSizePixel = 0,
+        Parent = holder,
+    })
+    return makeIcon(parent, { roof, body })
+end
+
+local function buildGearIcon(parent)
+    local holder = iconHolder(parent)
+    local parts = {}
+    for i = 0, 3 do
+        parts[#parts + 1] = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromOffset(10, 10),
+            Size = UDim2.fromOffset(3, 18),
+            Rotation = i * 45,
+            BorderSizePixel = 0,
+            Parent = holder,
+        })
+    end
+    local disc = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromOffset(10, 10),
+        Size = UDim2.fromOffset(12, 12),
+        BorderSizePixel = 0,
+        Parent = holder,
+    })
+    corner(disc, 6)
+    parts[#parts + 1] = disc
+    local hole = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromOffset(10, 10),
+        Size = UDim2.fromOffset(5, 5),
+        BackgroundColor3 = Theme.Topbar,
+        BorderSizePixel = 0,
+        Parent = holder,
+    })
+    corner(hole, 3)
+    return makeIcon(parent, parts)
+end
+
+------------------------------------------------------------------
+-- UI: TABS + PAGES
+------------------------------------------------------------------
+local Tabs, Pages = {}, {}
+local currentTab
+
+local Indicator = create("Frame", {
+    Position = UDim2.fromOffset(24, 44),
+    Size = UDim2.fromOffset(20, 2),
+    BackgroundColor3 = Theme.Accent,
+    BorderSizePixel = 0,
+    ZIndex = 3,
+    Parent = Topbar,
+})
+corner(Indicator, 1)
+
+local function createTab(name, x, iconBuilder)
+    local btn = create("TextButton", {
+        Name = name,
+        Position = UDim2.fromOffset(x, 6),
+        Size = UDim2.fromOffset(40, 34),
+        BackgroundColor3 = Theme.Element,
+        BackgroundTransparency = 1,
+        AutoButtonColor = false,
+        Text = "",
+        ZIndex = 2,
+        Parent = Topbar,
+    })
+    corner(btn, 8)
+    local icon = iconBuilder(btn)
+    icon.setInstant(Theme.SubText)
+    connect(btn.MouseEnter, function() tween(btn, 0.15, { BackgroundTransparency = 0 }) end)
+    connect(btn.MouseLeave, function() tween(btn, 0.15, { BackgroundTransparency = 1 }) end)
+    Tabs[name] = { button = btn, icon = icon, x = x }
+    return btn
+end
+
+local Content = create("Frame", {
+    Position = UDim2.fromOffset(0, 46),
+    Size = UDim2.new(1, 0, 1, -74),
+    BackgroundTransparency = 1,
+    ClipsDescendants = true,
+    Parent = Main,
+})
+
+local function createPage(name, scrolling)
+    local page = create("CanvasGroup", {
+        Name = name,
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        GroupTransparency = 1,
+        Visible = false,
+        Parent = Content,
+    })
+    local holder
+    if scrolling then
+        holder = create("ScrollingFrame", {
+            Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 3,
+            ScrollBarImageColor3 = Color3.fromRGB(70, 70, 70),
+            CanvasSize = UDim2.new(),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Parent = page,
+        })
+    else
+        holder = create("Frame", {
+            Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1,
+            Parent = page,
+        })
+    end
+    create("UIListLayout", {
+        Padding = UDim.new(0, 6),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Parent = holder,
+    })
+    create("UIPadding", {
+        PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12),
+        PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+        Parent = holder,
+    })
+    Pages[name] = page
+    return holder
+end
+
+local function switchTab(name)
+    if currentTab == name then return end
+    local prev = currentTab
+    currentTab = name
+
+    for tabName, tab in pairs(Tabs) do
+        tab.icon.set(tabName == name and Theme.Text or Theme.SubText)
+    end
+    tween(Indicator, 0.35, { Position = UDim2.fromOffset(Tabs[name].x + 10, 44) })
+
+    if prev then
+        tween(Pages[prev], 0.15, { GroupTransparency = 1 })
+        task.delay(0.17, function()
+            for pageName, p in pairs(Pages) do
+                if pageName ~= currentTab then p.Visible = false end
+            end
+        end)
+    end
+
+    local page = Pages[name]
+    page.Position = UDim2.fromOffset(0, 10)
+    page.GroupTransparency = 1
+    page.Visible = true
+    tween(page, 0.35, { GroupTransparency = 0, Position = UDim2.fromOffset(0, 0) })
+end
+
+------------------------------------------------------------------
+-- UI: COMPONENTS
+------------------------------------------------------------------
+local function createSection(parent, text)
+    local label = create("TextLabel", {
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 20),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        Text = string.upper(text),
+        TextColor3 = Theme.SubText,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = parent,
+    })
+    create("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingTop = UDim.new(0, 6), Parent = label })
+end
+
+local function createRow(parent, text)
+    local row = create("TextButton", {
+        LayoutOrder = nextOrder(),
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundColor3 = Theme.Element,
+        AutoButtonColor = false,
+        Text = "",
+        BorderSizePixel = 0,
+        Parent = parent,
+    })
+    corner(row, 8)
+    stroke(row, Theme.Stroke, 1)
+    local label = create("TextLabel", {
+        Position = UDim2.fromOffset(12, 0),
+        Size = UDim2.new(1, -100, 1, 0),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        Text = text,
+        TextColor3 = Theme.Text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = row,
+    })
+    connect(row.MouseEnter, function() tween(row, 0.15, { BackgroundColor3 = Theme.ElementHover }) end)
+    connect(row.MouseLeave, function() tween(row, 0.15, { BackgroundColor3 = Theme.Element }) end)
+    return row, label
+end
+
+local function createToggle(parent, text, default, callback)
+    local row = createRow(parent, text)
+    local pill = create("Frame", {
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -12, 0.5, 0),
+        Size = UDim2.fromOffset(36, 20),
+        BackgroundColor3 = Theme.Off,
+        BorderSizePixel = 0,
+        Parent = row,
+    })
+    corner(pill, 10)
+    local knob = create("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 3, 0.5, 0),
+        Size = UDim2.fromOffset(14, 14),
+        BackgroundColor3 = Color3.fromRGB(150, 150, 150),
+        BorderSizePixel = 0,
+        Parent = pill,
+    })
+    corner(knob, 7)
+
+    local state = default
+    local function render(instant)
+        local pos  = state and UDim2.new(0, 19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+        local pcol = state and Theme.Accent or Theme.Off
+        local kcol = state and Color3.new(1, 1, 1) or Color3.fromRGB(150, 150, 150)
+        if instant then
+            knob.Position, pill.BackgroundColor3, knob.BackgroundColor3 = pos, pcol, kcol
+        else
+            tween(knob, 0.25, { Position = pos, BackgroundColor3 = kcol }, Enum.EasingStyle.Back)
+            tween(pill, 0.25, { BackgroundColor3 = pcol })
+        end
+    end
+    render(true)
+
+    connect(row.MouseButton1Click, function()
+        state = not state
+        render(false)
+        callback(state)
+    end)
+end
+
+-- colour picker popup (shared by all colour rows)
+local Picker = {}
+do
+    local isOpen, callback = false, nil
+    local h, s, v = 0, 1, 1
+
+    local overlay = create("TextButton", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Color3.new(0, 0, 0),
+        BackgroundTransparency = 1,
+        AutoButtonColor = false,
+        Text = "",
+        Visible = false,
+        ZIndex = 50,
+        Parent = Main,
+    })
+    local panel = create("CanvasGroup", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(210, 206),
+        BackgroundColor3 = Theme.Element,
+        BorderSizePixel = 0,
+        GroupTransparency = 1,
+        Active = true,
+        Visible = false,
+        Parent = overlay,
+    })
+    corner(panel, 10)
+    stroke(panel, Theme.Stroke, 1)
+    local panelScale = create("UIScale", { Scale = 0.92, Parent = panel })
+
+    local sv = create("Frame", {
+        Position = UDim2.fromOffset(12, 12),
+        Size = UDim2.fromOffset(186, 120),
+        BackgroundColor3 = Color3.fromHSV(0, 1, 1),
+        BorderSizePixel = 0,
+        Parent = panel,
+    })
+    corner(sv, 6)
+    local white = create("Frame", {
+        Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0, ZIndex = 2, Parent = sv,
+    })
+    corner(white, 6)
+    create("UIGradient", { Transparency = NumberSequence.new(0, 1), Parent = white })
+    local black = create("Frame", {
+        Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+        BorderSizePixel = 0, ZIndex = 3, Parent = sv,
+    })
+    corner(black, 6)
+    create("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(1, 0), Parent = black })
+    local cursor = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Size = UDim2.fromOffset(10, 10),
+        BackgroundTransparency = 1,
+        ZIndex = 4,
+        Parent = sv,
+    })
+    corner(cursor, 5)
+    stroke(cursor, Color3.new(1, 1, 1), 2)
+
+    local hue = create("Frame", {
+        Position = UDim2.fromOffset(12, 142),
+        Size = UDim2.fromOffset(186, 12),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        Parent = panel,
+    })
+    corner(hue, 6)
+    create("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0,     Color3.fromRGB(255, 0, 0)),
+            ColorSequenceKeypoint.new(1 / 6, Color3.fromRGB(255, 255, 0)),
+            ColorSequenceKeypoint.new(2 / 6, Color3.fromRGB(0, 255, 0)),
+            ColorSequenceKeypoint.new(3 / 6, Color3.fromRGB(0, 255, 255)),
+            ColorSequenceKeypoint.new(4 / 6, Color3.fromRGB(0, 0, 255)),
+            ColorSequenceKeypoint.new(5 / 6, Color3.fromRGB(255, 0, 255)),
+            ColorSequenceKeypoint.new(1,     Color3.fromRGB(255, 0, 0)),
+        }),
+        Parent = hue,
+    })
+    local hueKnob = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Size = UDim2.fromOffset(6, 18),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 2,
+        Parent = hue,
+    })
+    corner(hueKnob, 3)
+    stroke(hueKnob, Color3.new(0, 0, 0), 1, 0.4)
+
+    local preview = create("Frame", {
+        Position = UDim2.fromOffset(12, 166),
+        Size = UDim2.fromOffset(28, 28),
+        BorderSizePixel = 0,
+        Parent = panel,
+    })
+    corner(preview, 6)
+    stroke(preview, Theme.Stroke, 1)
+    local hex = create("TextBox", {
+        Position = UDim2.fromOffset(48, 166),
+        Size = UDim2.fromOffset(150, 28),
+        BackgroundColor3 = Theme.Topbar,
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        TextColor3 = Theme.Text,
+        PlaceholderText = "#RRGGBB",
+        PlaceholderColor3 = Theme.SubText,
+        ClearTextOnFocus = false,
+        Text = "",
+        Parent = panel,
+    })
+    corner(hex, 6)
+    stroke(hex, Theme.Stroke, 1)
+
+    local function toHex(c)
+        return string.format("#%02X%02X%02X",
+            math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+    end
+
+    local function apply()
+        local c = Color3.fromHSV(h, s, v)
+        sv.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
+        cursor.Position = UDim2.fromScale(s, 1 - v)
+        hueKnob.Position = UDim2.new(h, 0, 0.5, 0)
+        preview.BackgroundColor3 = c
+        if not hex:IsFocused() then hex.Text = toHex(c) end
+        if callback then callback(c) end
+    end
+
+    local dragging
+    local function updateFromMouse()
+        local m = UserInputService:GetMouseLocation()
+        if dragging == "sv" then
+            s = math.clamp((m.X - sv.AbsolutePosition.X) / sv.AbsoluteSize.X, 0, 1)
+            v = 1 - math.clamp((m.Y - sv.AbsolutePosition.Y) / sv.AbsoluteSize.Y, 0, 1)
+        elseif dragging == "hue" then
+            h = math.clamp((m.X - hue.AbsolutePosition.X) / hue.AbsoluteSize.X, 0, 0.999)
+        end
+        apply()
+    end
+
+    connect(sv.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = "sv"; updateFromMouse()
+        end
+    end)
+    connect(hue.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = "hue"; updateFromMouse()
+        end
+    end)
+    connect(UserInputService.InputChanged, function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            updateFromMouse()
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = nil end
+    end)
+
+    connect(hex.FocusLost, function()
+        local txt = string.gsub(hex.Text, "#", "")
+        if string.match(txt, "^%x%x%x%x%x%x$") then
+            local r = tonumber(string.sub(txt, 1, 2), 16)
+            local g = tonumber(string.sub(txt, 3, 4), 16)
+            local b = tonumber(string.sub(txt, 5, 6), 16)
+            h, s, v = Color3.fromRGB(r, g, b):ToHSV()
+        end
+        apply()
+    end)
+
+    function Picker.Open(color, cb)
+        h, s, v = color:ToHSV()
+        callback = nil
+        apply()
+        callback = cb
+        isOpen = true
+        overlay.Visible = true
+        panel.Visible = true
+        panel.GroupTransparency = 1
+        panelScale.Scale = 0.92
+        tween(overlay, 0.25, { BackgroundTransparency = 0.45 })
+        tween(panel, 0.25, { GroupTransparency = 0 })
+        tween(panelScale, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
+    end
+
+    function Picker.Close()
+        if not isOpen then return end
+        isOpen = false
+        callback = nil
+        dragging = nil
+        tween(overlay, 0.2, { BackgroundTransparency = 1 })
+        tween(panel, 0.2, { GroupTransparency = 1 })
+        tween(panelScale, 0.2, { Scale = 0.92 })
+        task.delay(0.22, function()
+            if not isOpen then
+                overlay.Visible = false
+                panel.Visible = false
+            end
+        end)
+    end
+
+    connect(overlay.MouseButton1Click, Picker.Close)
+end
+
+local function createColorRow(parent, text, default, callback)
+    local row = createRow(parent, text)
+    local swatch = create("Frame", {
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -12, 0.5, 0),
+        Size = UDim2.fromOffset(38, 20),
+        BackgroundColor3 = default,
+        BorderSizePixel = 0,
+        Parent = row,
+    })
+    corner(swatch, 6)
+    stroke(swatch, Theme.Stroke, 1)
+    local current = default
+    connect(row.MouseButton1Click, function()
+        Picker.Open(current, function(c)
+            current = c
+            swatch.BackgroundColor3 = c
+            callback(c)
+        end)
+    end)
+end
+
+local isListening = false
+local function createKeybind(parent, text, default, callback)
+    local row = createRow(parent, text)
+    local btn = create("TextButton", {
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -8, 0.5, 0),
+        Size = UDim2.fromOffset(110, 24),
+        BackgroundColor3 = Theme.Topbar,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        TextColor3 = Theme.Text,
+        Text = default.Name,
+        Parent = row,
+    })
+    corner(btn, 6)
+    local btnStroke = stroke(btn, Theme.Stroke, 1)
+
+    local current = default
+    local function stopListening()
+        btn.Text = current.Name
+        tween(btnStroke, 0.2, { Color = Theme.Stroke })
+        task.defer(function() isListening = false end)
+    end
+
+    connect(btn.MouseButton1Click, function()
+        if isListening then return end
+        isListening = true
+        btn.Text = "press a key..."
+        tween(btnStroke, 0.2, { Color = Theme.Accent })
+    end)
+
+    connect(UserInputService.InputBegan, function(input)
+        if not isListening or input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        if input.KeyCode ~= Enum.KeyCode.Escape and input.KeyCode ~= Enum.KeyCode.Unknown then
+            current = input.KeyCode
+            callback(current)
+        end
+        stopListening()
+    end)
+end
+
+------------------------------------------------------------------
+-- UI: BUILD PAGES
+------------------------------------------------------------------
+createTab("Home", 14, buildHomeIcon)
+createTab("Settings", 60, buildGearIcon)
+
+-- make the tab buttons actually switch pages
+for tabName, tab in pairs(Tabs) do
+    connect(tab.button.MouseButton1Click, function()
+        switchTab(tabName)
+    end)
+end
+
+local homeHolder = createPage("Home", true)
+local settingsHolder = createPage("Settings", false)
+
+-- Home
+createSection(homeHolder, "ESP")
+createToggle(homeHolder, "ESP Enabled", Settings.Enabled, function(v) Settings.Enabled = v end)
+createToggle(homeHolder, "Chams", Settings.Chams, function(v) Settings.Chams = v end)
+
+createSection(homeHolder, "Player Info")
+createToggle(homeHolder, "Show Username", Settings.Username, function(v) Settings.Username = v end)
+createToggle(homeHolder, "Show Distance", Settings.Distance, function(v) Settings.Distance = v end)
+createToggle(homeHolder, "Show Health", Settings.Health, function(v) Settings.Health = v end)
+
+createSection(homeHolder, "Teams")
+createToggle(homeHolder, "Team Colors", Settings.TeamColors, function(v) Settings.TeamColors = v end)
+createColorRow(homeHolder, "Enemy Color", Settings.EnemyColor, function(c) Settings.EnemyColor = c end)
+createColorRow(homeHolder, "Team Color", Settings.TeamColor, function(c) Settings.TeamColor = c end)
+
+-- Settings
+createSection(settingsHolder, "Interface")
+createKeybind(settingsHolder, "Open / Close Keybind", Settings.Keybind, function(key)
+    Settings.Keybind = key
+    HintLabel.Text = "[" .. key.Name .. "] hide"
+end)
+
+createSection(settingsHolder, "Script")
+do
+    local row, label = createRow(settingsHolder, "Unload Nova Client")
+    label.TextColor3 = Color3.fromRGB(240, 110, 110)
+    connect(row.MouseButton1Click, function() Unload() end)
+end
+
+------------------------------------------------------------------
+-- OPEN / CLOSE + DRAGGING
+------------------------------------------------------------------
+local opened = false
+local function setOpen(state)
+    if opened == state then return end
+    opened = state
+    if state then
+        if not Main.Visible then
+            Main.GroupTransparency = 1
+            Scale.Scale = 0.88
+            Main.Visible = true
+        end
+        tween(Main, 0.3, { GroupTransparency = 0 })
+        tween(Scale, 0.45, { Scale = 1 }, Enum.EasingStyle.Back)
+    else
+        Picker.Close()
+        tween(Main, 0.2, { GroupTransparency = 1 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        tween(Scale, 0.25, { Scale = 0.9 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        task.delay(0.27, function()
+            if not opened then Main.Visible = false end
+        end)
+    end
+end
+
+connect(UserInputService.InputBegan, function(input)
+    if unloaded or isListening then return end
+    if UserInputService:GetFocusedTextBox() then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Settings.Keybind then
+        setOpen(not opened)
+    end
+end)
+
+do
+    local dragging, dragStart, startPos
+    connect(DragHandle.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = UserInputService:GetMouseLocation()
+            startPos = Main.Position
+        end
+    end)
+    connect(UserInputService.InputChanged, function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = UserInputService:GetMouseLocation() - dragStart
+            Main.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+end
+
+------------------------------------------------------------------
+-- UNLOAD
+------------------------------------------------------------------
+Unload = function()
+    if unloaded then return end
+    setOpen(false)
+    unloaded = true
+    for _, c in ipairs(connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    for plr in pairs(ESPObjects) do removeESP(plr) end
+    pcall(function() ESPFolder:Destroy() end)
+    task.delay(0.35, function()
+        pcall(function() ScreenGui:Destroy() end)
+    end)
+    env.NovaClientUnload = nil
+end
+env.NovaClientUnload = Unload
+
+------------------------------------------------------------------
+-- START
+------------------------------------------------------------------
+switchTab("Home")
+setOpen(true)
